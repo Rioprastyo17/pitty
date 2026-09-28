@@ -1,6 +1,6 @@
 # Pitty
 
-Pitty is a powerful **Local AI Coding Assistant** designed to run entirely on your machine using Ollama. It features interactive chat, tool calling, and a learning memory system to adapt to your coding style.
+Pitty is a powerful **Local AI Coding Assistant** designed to run entirely on your machine using Ollama. It features interactive chat, tool calling, and a learning memory system to adapt to your coding workflow.
 
 ## 🚀 Features
 
@@ -15,15 +15,49 @@ Pitty is a powerful **Local AI Coding Assistant** designed to run entirely on yo
 
 * **Go 1.24+** (for building)
 * **[Ollama](https://ollama.com/)** running locally.
+* A model pulled into Ollama, such as `qwen2.5:0.5b`.
 
 ## 🛠️ Installation
 
-Clone the repository and build the binary:
+Follow these steps to install and run Pitty on your machine:
+
+1. Install Go 1.24 or newer.
+2. Install [Ollama](https://ollama.com/) and make sure the Ollama service is running locally.
+3. Pull a supported model:
 
 ```bash
-git clone https://github.com/pitty/pitty.git
+ollama pull qwen2.5:0.5b
+```
+
+4. Clone the repository:
+
+```bash
+git clone https://github.com/Rioprastyo17/pitty.git
 cd pitty
+```
+
+5. Build the binary:
+
+```bash
 go build -o pitty ./cmd/pitty
+```
+
+6. Run Pitty:
+
+```bash
+./pitty
+```
+
+Optional: install it globally so it can be run from anywhere:
+
+```bash
+sudo install -m 755 pitty /usr/local/bin/pitty
+```
+
+You can then run:
+
+```bash
+pitty
 ```
 
 ## 🎮 Usage
@@ -65,7 +99,7 @@ While in the interactive chat, you can use these commands:
 
 ## 🧠 Memory System
 
-Pitty has a built-in memory system that stores learned facts and preferences. It will automatically learn from your interactions, or you can explicitly teach it using the `/learn` command. These memories persist between sessions, making Pitty smarter and more tailored to your workflow over time.
+Pitty has a built-in memory system that stores learned facts and preferences. It will automatically learn from your interactions, or you can explicitly teach it using the `/learn` command. These memories help personalize future coding assistance.
 
 ## 📄 License
 
