@@ -60,6 +60,28 @@ You can then run:
 pitty
 ```
 
+## 💡 Recommended Setup
+
+Here are my recommendations for the best experience while using Pitty:
+
+* **For low-end machines:** use `qwen2.5:0.5b` or `qwen2.5:1.5b` for low memory usage.
+* **For better code quality:** use `qwen2.5:3b` or `qwen2.5:7b` if your machine has enough RAM and CPU power.
+* **For coding tasks:** start with a lower temperature such as `0.2` to `0.4` for more stable and consistent output.
+* **Keep Ollama running in the background** so Pitty can access the model without restarting the service.
+* **Use a dedicated terminal session** when testing features like tool calling and file editing.
+
+Example for a stronger coding setup:
+
+```bash
+./pitty --model qwen2.5:3b --temperature 0.3
+```
+
+If the model does not load, make sure Ollama is installed and running:
+
+```bash
+ollama serve
+```
+
 ## 🎮 Usage
 
 Start Pitty in interactive mode simply by running:
