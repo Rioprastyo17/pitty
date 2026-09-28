@@ -22,7 +22,7 @@ var memStore *memory.Store
 
 func main() {
 	// Flags
-	model := flag.String("model", "qwen2.5-coder:1.5b", "Ollama model to use")
+	model := flag.String("model", "qwen2.5:0.5b", "Ollama model to use")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama API URL")
 	temp := flag.Float64("temperature", 0.7, "Temperature for generation")
 	maxTokens := flag.Int("max-tokens", 4096, "Max tokens to generate")
