@@ -109,7 +109,10 @@ func (a *Agent) Chat(ctx context.Context, userMessage string, onChunk func(strin
 
 		// --- Tool-calling branch ---
 		if a.toolsSupported && a.registry.Len() > 0 {
-			resp, err := a.client.Chat(ctx, ollama.ChatRequest{
+			var fullContent strings.Builder
+			var toolCalls []ollama.ToolCall
+
+			err := a.client.ChatStream(ctx, ollama.ChatRequest{
 				Model:    a.model,
 				Messages: messages,
 				Tools:    a.registry.ToOllamaTools(),
@@ -117,7 +120,16 @@ func (a *Agent) Chat(ctx context.Context, userMessage string, onChunk func(strin
 					Temperature: a.temperature,
 					NumPredict:  a.maxTokens,
 				},
+			}, func(chunk ollama.ChatStreamChunk) {
+				if chunk.Message.Content != "" {
+					onChunk(chunk.Message.Content)
+					fullContent.WriteString(chunk.Message.Content)
+				}
+				if len(chunk.Message.ToolCalls) > 0 {
+					toolCalls = chunk.Message.ToolCalls
+				}
 			})
+
 			if err != nil {
 				if isToolUnsupportedError(err) {
 					// Model doesn't support tools — fall back to streaming forever.
@@ -127,26 +139,31 @@ func (a *Agent) Chat(ctx context.Context, userMessage string, onChunk func(strin
 				return fmt.Errorf("chat: %w", err)
 			}
 
+			finalContent := fullContent.String()
+
 			// If the model returned tool calls, execute them and loop.
-			if len(resp.Message.ToolCalls) > 0 {
-				a.history = append(a.history, resp.Message)
-				if err := a.executeToolCalls(ctx, resp.Message.ToolCalls, userMessage); err != nil {
+			if len(toolCalls) > 0 {
+				a.history = append(a.history, ollama.Message{
+					Role:      "assistant",
+					Content:   finalContent,
+					ToolCalls: toolCalls,
+				})
+				if err := a.executeToolCalls(ctx, toolCalls, userMessage); err != nil {
 					return err
 				}
 				continue // back to top of loop for next model turn
 			}
 
 			// No tool calls — the model gave a final text response.
-			if resp.Message.Content != "" {
+			if finalContent != "" {
 				a.history = append(a.history, ollama.Message{
 					Role:    "assistant",
-					Content: resp.Message.Content,
+					Content: finalContent,
 				})
 				// Auto-learn from the assistant's response.
 				if a.learner != nil {
-					a.learner.LearnFromAssistantResponse(resp.Message.Content, userMessage)
+					a.learner.LearnFromAssistantResponse(finalContent, userMessage)
 				}
-				onChunk(resp.Message.Content)
 				return nil
 			}
 		}
