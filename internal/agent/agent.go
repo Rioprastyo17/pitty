@@ -13,19 +13,18 @@ import (
 
 // Agent orchestrates chat, tool calling, memory, and streaming.
 type Agent struct {
-	client       *ollama.Client
-	registry     *tools.Registry
-	model        string
-	temperature  float64
-	maxTokens    int
-	systemPrompt string
-	history      []ollama.Message
-	onToolCall   func(name string, args map[string]interface{})
-	onToolResult func(name string, result string)
-	memStore     *memory.Store
-	learner      *memory.Learner
-	// toolsSupported tracks whether the current model supports tool calling.
-	toolsSupported bool
+	client         *ollama.Client
+	registry       *tools.Registry
+	model          string
+	temperature    float64
+	maxTokens      int
+	systemPrompt   string
+	history        []ollama.Message
+	onToolCall     func(name string, args map[string]interface{})
+	onToolResult   func(name string, result string)
+	memStore       *memory.Store
+	learner        *memory.Learner
+	toolsSupported bool // tracks whether the current model supports tool calling
 }
 
 // NewAgent creates a new Agent with tool support enabled by default.
@@ -180,6 +179,8 @@ func (a *Agent) streamResponse(ctx context.Context, messages []ollama.Message, o
 
 	finalContent := full.String()
 	a.history = append(a.history, ollama.Message{Role: "assistant", Content: finalContent})
+	
+	// Auto-learn from streaming response.
 	if a.learner != nil {
 		lastUser := ""
 		for i := len(a.history) - 2; i >= 0; i-- {
@@ -188,7 +189,9 @@ func (a *Agent) streamResponse(ctx context.Context, messages []ollama.Message, o
 				break
 			}
 		}
-		a.learner.LearnFromAssistantResponse(finalContent, lastUser)
+		if lastUser != "" {
+			a.learner.LearnFromAssistantResponse(finalContent, lastUser)
+		}
 	}
 	return nil
 }
@@ -261,6 +264,14 @@ func (a *Agent) HistoryJSON() string {
 	return string(data)
 }
 
+// isToolUnsupportedError returns true when Ollama rejects the tools parameter.
+func isToolUnsupportedError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "does not support tools") ||
+		(strings.Contains(msg, "tool") && strings.Contains(msg, "400")) ||
+		strings.Contains(msg, "status 400")
+}
+
 // TokenEstimate returns a rough estimate of tokens used in history.
 func (a *Agent) TokenEstimate() int {
 	total := 0
@@ -271,10 +282,3 @@ func (a *Agent) TokenEstimate() int {
 	return total
 }
 
-// isToolUnsupportedError returns true when Ollama rejects the tools parameter.
-func isToolUnsupportedError(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "does not support tools") ||
-		strings.Contains(msg, "tool") && strings.Contains(msg, "400") ||
-		strings.Contains(msg, "status 400")
-}

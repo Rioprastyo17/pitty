@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/pitty/pitty/internal/agent"
+	"github.com/pitty/pitty/internal/logger"
 	"github.com/pitty/pitty/internal/memory"
 	"github.com/pitty/pitty/internal/ollama"
 	"github.com/pitty/pitty/internal/tools"
@@ -21,7 +22,7 @@ const version = "0.2.0"
 func main() {
 	// ── CLI flags ──────────────────────────────────────────────────────────
 	model := flag.String("model", "qwen2.5-coder:1.5b", "Ollama model to use")
-	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama API URL")
+	ollamaURL := flag.String("ollama-url", "http://127.0.0.1:11434", "Ollama API URL")
 	temp := flag.Float64("temperature", 0.7, "Sampling temperature (0.0–2.0)")
 	maxTokens := flag.Int("max-tokens", 8192, "Max tokens to generate")
 	sysPromptFile := flag.String("system-prompt", "", "Path to a custom system prompt file")
@@ -41,6 +42,13 @@ func main() {
 
 	flag.Parse()
 	args := flag.Args()
+
+	// ── Logger ─────────────────────────────────────────────────────────────
+	logPath, logErr := logger.Init(logger.LevelDebug)
+	defer logger.Close()
+	// We'll report logErr after the UI is ready (below).
+	_ = logPath
+	_ = logErr
 
 	// ── Version flag ───────────────────────────────────────────────────────
 	if *showVersion {
@@ -121,12 +129,19 @@ func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL st
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Show log file path if logger was initialized
+	if lp := logger.FilePath(); lp != "" {
+		t.PrintInfo(fmt.Sprintf("  📋 Log: %s", lp))
+	}
+
 	// ── Check Ollama connectivity ──────────────────────────────────────────
 	if err := client.Ping(ctx); err != nil {
+		logger.Error("Ollama connectivity check failed: %v", err)
 		t.PrintError(err)
 		t.PrintInfo("Make sure Ollama is running: ollama serve")
 		os.Exit(1)
 	}
+	logger.Info("Connected to Ollama at %s, model=%s", ollamaURL, model)
 
 	// ── Memory system ──────────────────────────────────────────────────────
 	store, err := memory.NewStore()
@@ -154,6 +169,7 @@ func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL st
 		registry.Register(&tools.RunCommandTool{})
 		registry.Register(&tools.SearchFilesTool{})
 		registry.Register(&tools.ListDirTool{})
+		registry.Register(&tools.WebSearchTool{})
 	}
 
 	// ── Agent ──────────────────────────────────────────────────────────────
@@ -196,6 +212,7 @@ func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL st
 		<-sigCh
 		fmt.Println()
 		t.StopThinking()
+		logger.Info("Received interrupt signal — exiting")
 		if store != nil {
 			t.PrintInfo(fmt.Sprintf("💾 Knowledge saved: %d entries", store.Count()))
 		}

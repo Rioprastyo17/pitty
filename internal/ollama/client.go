@@ -69,6 +69,7 @@ type ChatResponse struct {
 	Done          bool    `json:"done"`
 	TotalDuration int64   `json:"total_duration"`
 	EvalCount     int     `json:"eval_count"`
+	Error         string  `json:"error,omitempty"`
 }
 
 // ChatStreamChunk is a single chunk from a streaming chat response.
@@ -76,6 +77,7 @@ type ChatStreamChunk struct {
 	Model   string  `json:"model"`
 	Message Message `json:"message"`
 	Done    bool    `json:"done"`
+	Error   string  `json:"error,omitempty"`
 }
 
 // Model represents an Ollama model.
@@ -122,6 +124,9 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
+	if chatResp.Error != "" {
+		return nil, fmt.Errorf("ollama error: %s", chatResp.Error)
+	}
 	return &chatResp, nil
 }
 
@@ -139,8 +144,9 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, callback func(
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Use a client without timeout for streaming
-	streamClient := &http.Client{}
+	// Use a client without timeout for streaming, but preserve transport
+	streamClient := *c.HTTPClient
+	streamClient.Timeout = 0
 	resp, err := streamClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("do request: %w", err)
@@ -162,6 +168,9 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, callback func(
 		var chunk ChatStreamChunk
 		if err := json.Unmarshal(line, &chunk); err != nil {
 			continue
+		}
+		if chunk.Error != "" {
+			return fmt.Errorf("ollama stream error: %s", chunk.Error)
 		}
 		callback(chunk)
 		if chunk.Done {
@@ -194,6 +203,8 @@ func (c *Client) ListModels(ctx context.Context) ([]Model, error) {
 
 // Ping checks if Ollama is reachable.
 func (c *Client) Ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", c.BaseURL+"/", nil)
 	if err != nil {
 		return err
