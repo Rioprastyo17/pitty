@@ -1,32 +1,28 @@
-# Pitty
+# Pitty v0.2.0
 
-Pitty is a powerful **Local AI Coding Assistant** designed to run entirely on your machine using Ollama. It features interactive chat, tool calling, and a learning memory system to adapt to your coding workflow.
+**Pitty** is a powerful **Local AI Coding Assistant** that runs entirely on your machine using Ollama — no cloud, no API keys.
 
 ## 🚀 Features
 
-* **Local AI via Ollama:** Connects seamlessly to your local Ollama instance (defaults to `qwen2.5:0.5b`).
-* **Tool Calling:** Capable of reading/writing files, executing commands, and searching directories to assist you with coding tasks.
-* **Persistent Memory & Learning:** Automatically learns facts and preferences during conversation or via explicit commands (`/learn`).
-* **Antigravity CLI Integration:** Can import knowledge and memory entries directly from Antigravity CLI transcripts.
-* **Customizable:** Support for custom system prompts and adjustable generation parameters (temperature, max tokens).
-* **Interactive Terminal UI:** A clean, easy-to-use REPL environment with built-in slash commands.
+- **100% Local & Offline** — Powered by Ollama. Your code never leaves your machine.
+- **GGUF Model Support** — Uses `qwen2.5-coder:1.5b` (GGUF format, ~986MB) by default. Fast and coding-focused.
+- **Tool Calling** — Reads/writes files, runs commands, searches codebases, all autonomously.
+- **Persistent Memory** — Auto-learns facts, preferences, and workflows from conversations. Persists across sessions.
+- **Antigravity CLI Integration** — Imports knowledge from AGY transcripts via `--import-agy`.
+- **Conversation Compaction** — `/compact` summarizes a long conversation and resets context.
+- **Interactive Terminal UI** — Spinner, ANSI colors, multi-line input, slash commands.
+- **Zero Dependencies** — Pure Go standard library. No `go.sum`.
 
 ## 📋 Requirements
 
-* **Go 1.24+** (for building)
-* **[Ollama](https://ollama.com/)** running locally.
-* A model pulled into Ollama, such as `qwen2.5:0.5b`.
+- **Go 1.24+** (for building)
+- **[Ollama](https://ollama.com/)** running locally (`ollama serve`)
+- `qwen2.5-coder:1.5b` model (already included if you followed setup)
 
 ## 🛠️ Installation
 
-Follow these steps to install and run Pitty on your machine:
-
-1. Install Go 1.24 or newer.
-2. Install [Ollama](https://ollama.com/) and make sure the Ollama service is running locally.
-3. Pull a supported model:
-
 ```bash
-ollama pull qwen2.5:0.5b
+ollama pull qwen2.5-coder:1.5b
 ```
 
 4. Clone the repository:
@@ -40,89 +36,100 @@ cd pitty
 
 ```bash
 go build -o pitty ./cmd/pitty
+
+# Optional: install globally
+sudo cp pitty /usr/local/bin/pitty
 ```
 
-6. Run Pitty:
+## 🤖 Model Setup (GGUF via Ollama)
+
+Pitty defaults to `qwen2.5-coder:1.5b` — a lightweight GGUF coding model (~986 MB):
 
 ```bash
-./pitty
+ollama pull qwen2.5-coder:1.5b
 ```
 
-Optional: install it globally so it can be run from anywhere:
+Other lightweight options:
 
-```bash
-sudo install -m 755 pitty /usr/local/bin/pitty
-```
+| Model | Size | Best for |
+|-------|------|----------|
+| `qwen2.5-coder:1.5b` | 986 MB | Code (default) |
+| `deepseek-coder:1.3b` | 776 MB | Code, very fast |
+| `gemma3:1b` | 815 MB | General |
+| `qwen2.5:0.5b` | 397 MB | Ultra-light |
 
-You can then run:
-
-```bash
-pitty
-```
-
-## 💡 Recommended Setup
-
-Here are my recommendations for the best experience while using Pitty:
-
-* **For low-end machines:** use `qwen2.5:0.5b` or `qwen2.5:1.5b` for low memory usage.
-* **For better code quality:** use `qwen2.5:3b` or `qwen2.5:7b` if your machine has enough RAM and CPU power.
-* **For coding tasks:** start with a lower temperature such as `0.2` to `0.4` for more stable and consistent output.
-* **Keep Ollama running in the background** so Pitty can access the model without restarting the service.
-* **Use a dedicated terminal session** when testing features like tool calling and file editing.
-
-Example for a stronger coding setup:
-
-```bash
-./pitty --model qwen2.5:3b --temperature 0.3
-```
-
-If the model does not load, make sure Ollama is installed and running:
-
-```bash
-ollama serve
-```
+Switch models at runtime: `/model deepseek-coder:1.3b`
 
 ## 🎮 Usage
 
-Start Pitty in interactive mode simply by running:
-
 ```bash
-./pitty
+pitty                             # Start interactive chat
+pitty --model gemma3:1b           # Use a different model
+pitty --no-tools                  # Disable tool calling (pure chat)
+pitty --system-prompt prompt.txt  # Custom system prompt
+pitty models                      # List available models
+pitty --import-agy                # Import from Antigravity CLI
 ```
 
 ### Command Line Flags
 
-You can customize Pitty's behavior when starting up:
-
-```bash
-  --model string           Ollama model to use (default "qwen2.5:0.5b")
-  --ollama-url string      Ollama API URL (default "http://localhost:11434")
-  --temperature float      Temperature for generation (default 0.7)
-  --max-tokens int         Max tokens to generate (default 4096)
-  --system-prompt string   Path to custom system prompt file
-  --no-tools               Disable tool calling (simple chat mode)
-  --import-agy             Import knowledge from Antigravity CLI transcripts
+```
+--model string           Ollama model (default "qwen2.5-coder:1.5b")
+--ollama-url string      Ollama API URL (default "http://127.0.0.1:11434")
+--temperature float      Sampling temperature (default 0.7)
+--max-tokens int         Max tokens to generate (default 8192)
+--system-prompt string   Path to custom system prompt file
+--no-tools               Disable tool calling (simple chat mode)
+--import-agy             Import knowledge from Antigravity CLI and exit
 ```
 
 ### Slash Commands
 
-While in the interactive chat, you can use these commands:
-
-* `/help` - Show available commands
-* `/exit`, `/quit`, `/q` - Exit pitty
-* `/clear`, `/reset` - Clear conversation history
-* `/model <name>` - Switch model
-* `/models` - List available models
-* `/learn <text>` - Teach pitty something to remember (e.g., `/learn Always use Go 1.24 formatting`)
-* `/memory` - Show knowledge base status
-* `/memory search <q>` - Search knowledge base
-* `/import` - Import knowledge from Antigravity CLI
-* `/history` - Show conversation history
+| Command | Description |
+|---------|-------------|
+| `/help` | Show all commands |
+| `/exit`, `/quit`, `/q` | Exit pitty |
+| `/clear`, `/reset` | Clear conversation history |
+| `/model <name>` | Switch model at runtime |
+| `/models` | List available models (current model marked with ●) |
+| `/learn <text>` | Teach pitty something to remember |
+| `/memory` | Show knowledge base status |
+| `/memory search <q>` | Search knowledge base |
+| `/import` | Import from Antigravity CLI |
+| `/history` | Show conversation history (JSON) |
+| `/tokens` | Show estimated token usage |
+| `/compact` | Summarize and compact conversation |
 
 ## 🧠 Memory System
 
-Pitty has a built-in memory system that stores learned facts and preferences. It will automatically learn from your interactions, or you can explicitly teach it using the `/learn` command. These memories help personalize future coding assistance.
+Pitty automatically learns from every session:
+
+- **Tool calls** → remembers commands and file operations
+- **User instructions** → detects preferences ("always use..."), corrections
+- **Code generation** → notes languages and patterns used
+- **Explicit teaching** → `/learn selalu jawab dalam bahasa Indonesia`
+
+Stored at `~/.pitty/memory/knowledge.jsonl` (up to 2000 entries, JSONL format).
+
+### Antigravity CLI Integration
+
+```bash
+pitty --import-agy   # one-time import
+# or inside pitty:
+/import
+```
+
+## 🔧 Tools
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read file with optional line range |
+| `write_file` | Create/overwrite files (creates parent dirs) |
+| `edit_file` | Search-and-replace in files (`all=true` for global replace) |
+| `run_command` | Execute shell commands with configurable timeout |
+| `search_files` | Regex search across files (like grep) |
+| `list_directory` | List directory contents, optionally recursive |
 
 ## 📄 License
 
-This project is open-source.
+Open-source. Use freely.

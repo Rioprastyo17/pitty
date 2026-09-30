@@ -16,26 +16,25 @@ import (
 	"github.com/pitty/pitty/internal/ui"
 )
 
-const version = "0.1.0"
-
-var memStore *memory.Store
+const version = "0.2.0"
 
 func main() {
-	// Flags
-	model := flag.String("model", "qwen2.5:0.5b", "Ollama model to use")
+	// ── CLI flags ──────────────────────────────────────────────────────────
+	model := flag.String("model", "qwen2.5-coder:1.5b", "Ollama model to use")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama API URL")
-	temp := flag.Float64("temperature", 0.7, "Temperature for generation")
-	maxTokens := flag.Int("max-tokens", 4096, "Max tokens to generate")
-	sysPromptFile := flag.String("system-prompt", "", "Path to custom system prompt file")
+	temp := flag.Float64("temperature", 0.7, "Sampling temperature (0.0–2.0)")
+	maxTokens := flag.Int("max-tokens", 8192, "Max tokens to generate")
+	sysPromptFile := flag.String("system-prompt", "", "Path to a custom system prompt file")
 	noTools := flag.Bool("no-tools", false, "Disable tool calling (simple chat mode)")
-	importAGY := flag.Bool("import-agy", false, "Import knowledge from Antigravity CLI transcripts")
+	importAGY := flag.Bool("import-agy", false, "Import knowledge from Antigravity CLI transcripts and exit")
+	showVersion := flag.Bool("version", false, "Print version and exit")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "pitty v%s - Local AI Coding Assistant\n\n", version)
+		fmt.Fprintf(os.Stderr, "pitty v%s — Local AI Coding Assistant\n\n", version)
 		fmt.Fprintf(os.Stderr, "Usage:\n")
-		fmt.Fprintf(os.Stderr, "  pitty [flags]              Start interactive chat\n")
-		fmt.Fprintf(os.Stderr, "  pitty models               List available Ollama models\n")
-		fmt.Fprintf(os.Stderr, "  pitty version              Show version\n\n")
+		fmt.Fprintf(os.Stderr, "  pitty [flags]          Start interactive chat\n")
+		fmt.Fprintf(os.Stderr, "  pitty models           List available Ollama models\n")
+		fmt.Fprintf(os.Stderr, "  pitty version          Show version\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
@@ -43,10 +42,16 @@ func main() {
 	flag.Parse()
 	args := flag.Args()
 
+	// ── Version flag ───────────────────────────────────────────────────────
+	if *showVersion {
+		fmt.Printf("pitty v%s\n", version)
+		return
+	}
+
 	client := ollama.NewClient(*ollamaURL)
 	t := ui.NewTerminalUI()
 
-	// Handle subcommands
+	// ── Subcommands ────────────────────────────────────────────────────────
 	if len(args) > 0 {
 		switch args[0] {
 		case "version":
@@ -58,19 +63,24 @@ func main() {
 		case "help":
 			flag.Usage()
 			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", args[0])
+			flag.Usage()
+			os.Exit(1)
 		}
 	}
 
-	// Handle --import-agy flag
+	// ── --import-agy ──────────────────────────────────────────────────────
 	if *importAGY {
 		cmdImportAGY(t)
 		return
 	}
 
-	// Interactive mode
+	// ── Interactive mode ───────────────────────────────────────────────────
 	runInteractive(client, t, *model, *ollamaURL, *temp, *maxTokens, *sysPromptFile, *noTools)
 }
 
+// cmdModels lists all models available in Ollama.
 func cmdModels(client *ollama.Client, t *ui.TerminalUI) {
 	ctx := context.Background()
 	models, err := client.ListModels(ctx)
@@ -78,7 +88,6 @@ func cmdModels(client *ollama.Client, t *ui.TerminalUI) {
 		t.PrintError(fmt.Errorf("failed to list models: %w", err))
 		os.Exit(1)
 	}
-
 	t.PrintInfo("Available Ollama models:")
 	t.PrintInfo("")
 	for _, m := range models {
@@ -90,54 +99,53 @@ func cmdModels(client *ollama.Client, t *ui.TerminalUI) {
 	}
 }
 
+// cmdImportAGY imports knowledge from Antigravity CLI transcripts.
 func cmdImportAGY(t *ui.TerminalUI) {
 	store, err := memory.NewStore()
 	if err != nil {
 		t.PrintError(fmt.Errorf("failed to init memory: %w", err))
 		return
 	}
-
-	t.PrintInfo("Importing knowledge from Antigravity CLI transcripts...")
+	t.PrintInfo("Importing knowledge from Antigravity CLI transcripts…")
 	count, err := memory.ImportFromAntigravity(store)
 	if err != nil {
 		t.PrintError(fmt.Errorf("import error: %w", err))
 		return
 	}
-
 	t.PrintSuccess(fmt.Sprintf("Imported %d knowledge entries from Antigravity CLI", count))
 	t.PrintInfo(fmt.Sprintf("Total knowledge: %d entries", store.Count()))
 }
 
+// runInteractive is the main REPL loop.
 func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL string, temp float64, maxTokens int, sysPromptFile string, noTools bool) {
-	// Check Ollama connectivity
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// ── Check Ollama connectivity ──────────────────────────────────────────
 	if err := client.Ping(ctx); err != nil {
 		t.PrintError(err)
 		t.PrintInfo("Make sure Ollama is running: ollama serve")
 		os.Exit(1)
 	}
 
-	// Initialize memory system
+	// ── Memory system ──────────────────────────────────────────────────────
 	store, err := memory.NewStore()
 	if err != nil {
 		t.PrintWarning(fmt.Sprintf("Memory system unavailable: %v", err))
 	}
-	memStore = store
-
 	var learner *memory.Learner
 	if store != nil {
 		learner = memory.NewLearner(store)
-
-		// Auto-import from Antigravity on first run (if no existing knowledge)
+		// Auto-import from Antigravity on first run
 		if store.Count() == 0 {
 			count, _ := memory.ImportFromAntigravity(store)
 			if count > 0 {
-				t.PrintInfo(fmt.Sprintf("  📚 Imported %d entries from Antigravity CLI", count))
+				t.PrintInfo(fmt.Sprintf("  📚 Auto-imported %d entries from Antigravity CLI", count))
 			}
 		}
 	}
 
-	// Setup tool registry
+	// ── Tool registry ──────────────────────────────────────────────────────
 	registry := tools.NewRegistry()
 	if !noTools {
 		registry.Register(&tools.ReadFileTool{})
@@ -148,10 +156,8 @@ func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL st
 		registry.Register(&tools.ListDirTool{})
 	}
 
-	// Create agent
+	// ── Agent ──────────────────────────────────────────────────────────────
 	ag := agent.NewAgent(client, registry, model, temp, maxTokens)
-
-	// Attach memory
 	if store != nil && learner != nil {
 		ag.SetMemory(store, learner)
 	}
@@ -166,7 +172,7 @@ func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL st
 		ag.SetSystemPrompt(string(data))
 	}
 
-	// Set tool callbacks for display
+	// Tool display callbacks
 	ag.OnToolCall(func(name string, args map[string]interface{}) {
 		t.StopThinking()
 		t.PrintToolCall(name, args)
@@ -176,49 +182,49 @@ func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL st
 		t.StartThinking()
 	})
 
-	// Print welcome
-	t.PrintWelcome(model, ollamaURL)
-	if store != nil && store.Count() > 0 {
-		t.PrintInfo(fmt.Sprintf("  📚 Memory: %d learned entries", store.Count()))
-		fmt.Println()
+	// ── Welcome banner ─────────────────────────────────────────────────────
+	memCount := 0
+	if store != nil {
+		memCount = store.Count()
 	}
+	t.PrintWelcome(model, ollamaURL, memCount)
 
-	// Setup signal handling
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	// ── Signal handling ────────────────────────────────────────────────────
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigCh
 		fmt.Println()
-		t.PrintInfo("Interrupted. Goodbye!")
+		t.StopThinking()
+		if store != nil {
+			t.PrintInfo(fmt.Sprintf("💾 Knowledge saved: %d entries", store.Count()))
+		}
+		t.PrintInfo("Goodbye! 👋")
 		cancel()
 		os.Exit(0)
 	}()
 
-	// REPL loop
+	// ── REPL ───────────────────────────────────────────────────────────────
 	for {
 		input, err := t.ReadInput()
 		if err != nil {
 			break
 		}
-
 		if input == "" {
 			continue
 		}
 
 		// Handle slash commands
 		if strings.HasPrefix(input, "/") {
-			if handleCommand(input, ag, t, &model, client, store, learner) {
-				continue
-			}
+			handleCommand(ctx, input, ag, t, &model, client, store, learner, noTools)
+			continue
 		}
 
-		// Chat with agent
+		// ── Chat ───────────────────────────────────────────────────────────
 		t.StartThinking()
 		firstChunk := true
-		streamCallback := func(chunk string) {
+
+		onChunk := func(chunk string) {
 			if firstChunk {
 				t.StopThinking()
 				t.PrintStreamStart()
@@ -227,28 +233,33 @@ func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL st
 			t.PrintStreaming(chunk)
 		}
 
+		var chatErr error
 		if noTools {
-			err = ag.ChatSimple(ctx, input, streamCallback)
+			chatErr = ag.ChatSimple(ctx, input, onChunk)
 		} else {
-			err = ag.Chat(ctx, input, streamCallback)
+			chatErr = ag.Chat(ctx, input, onChunk)
 		}
+
 		t.StopThinking()
 		if !firstChunk {
 			t.PrintStreamEnd()
 		}
-
-		if err != nil {
-			t.PrintError(err)
+		if chatErr != nil {
+			t.PrintError(chatErr)
 		}
 	}
 }
 
-// handleCommand processes slash commands. Returns true if handled.
-func handleCommand(input string, ag *agent.Agent, t *ui.TerminalUI, model *string, client *ollama.Client, store *memory.Store, learner *memory.Learner) bool {
+// handleCommand processes a slash command entered by the user.
+func handleCommand(ctx context.Context, input string, ag *agent.Agent, t *ui.TerminalUI, model *string, client *ollama.Client, store *memory.Store, learner *memory.Learner, noTools bool) {
 	parts := strings.Fields(input)
+	if len(parts) == 0 {
+		return
+	}
 	cmd := parts[0]
 
 	switch cmd {
+	// ── Exit ────────────────────────────────────────────────────────────────
 	case "/exit", "/quit", "/q":
 		if store != nil {
 			t.PrintInfo(fmt.Sprintf("💾 Knowledge saved: %d entries", store.Count()))
@@ -256,38 +267,44 @@ func handleCommand(input string, ag *agent.Agent, t *ui.TerminalUI, model *strin
 		t.PrintInfo("Goodbye! 👋")
 		os.Exit(0)
 
+	// ── Clear conversation ──────────────────────────────────────────────────
 	case "/clear", "/reset":
 		ag.Reset()
 		t.PrintSuccess("Conversation history cleared.")
 
+	// ── Switch model ────────────────────────────────────────────────────────
 	case "/model":
 		if len(parts) < 2 {
 			t.PrintInfo("Current model: " + *model)
 			t.PrintInfo("Usage: /model <name>")
-			return true
+			return
 		}
-		newModel := parts[1]
-		*model = newModel
-		ag.SetModel(newModel)
-		t.PrintSuccess("Model switched to: " + newModel)
+		*model = parts[1]
+		ag.SetModel(parts[1])
+		t.PrintSuccess("Model switched to: " + parts[1])
 
+	// ── List models ─────────────────────────────────────────────────────────
 	case "/models":
-		ctx := context.Background()
 		models, err := client.ListModels(ctx)
 		if err != nil {
 			t.PrintError(err)
-			return true
+			return
 		}
 		t.PrintInfo("Available models:")
 		for _, m := range models {
-			fmt.Printf("  • %s\n", m.Name)
+			marker := " "
+			if m.Name == *model {
+				marker = "●"
+			}
+			fmt.Printf("  %s %s\n", marker, m.Name)
 		}
 
+	// ── Learn a fact ────────────────────────────────────────────────────────
 	case "/learn":
 		if len(parts) < 2 {
 			t.PrintInfo("Usage: /learn <something pitty should remember>")
 			t.PrintInfo("Example: /learn selalu gunakan bahasa Indonesia untuk menjawab")
-			return true
+			return
 		}
 		fact := strings.Join(parts[1:], " ")
 		if learner != nil {
@@ -297,12 +314,13 @@ func handleCommand(input string, ag *agent.Agent, t *ui.TerminalUI, model *strin
 			t.PrintWarning("Memory system not available")
 		}
 
+	// ── Memory status / search ──────────────────────────────────────────────
 	case "/memory":
 		if store == nil {
 			t.PrintWarning("Memory system not available")
-			return true
+			return
 		}
-		if len(parts) >= 2 && parts[1] == "search" && len(parts) >= 3 {
+		if len(parts) >= 3 && parts[1] == "search" {
 			query := strings.Join(parts[2:], " ")
 			entries := store.Search(query, 10)
 			if len(entries) == 0 {
@@ -310,28 +328,29 @@ func handleCommand(input string, ag *agent.Agent, t *ui.TerminalUI, model *strin
 			} else {
 				t.PrintInfo(fmt.Sprintf("Found %d matching entries:", len(entries)))
 				for _, e := range entries {
-					fmt.Printf("  [%s] %s %s(from %s)%s\n", e.Type, e.Content, "\033[90m", e.Source, "\033[0m")
+					fmt.Printf("  [%s] %s \033[90m(from %s)\033[0m\n", e.Type, e.Content, e.Source)
 				}
 			}
-		} else {
-			t.PrintInfo(fmt.Sprintf("📚 Knowledge base: %d entries", store.Count()))
-			recent := store.GetRecent(5)
-			if len(recent) > 0 {
-				t.PrintInfo("Recent learnings:")
-				for _, e := range recent {
-					fmt.Printf("  [%s] %s %s(from %s)%s\n", e.Type, e.Content, "\033[90m", e.Source, "\033[0m")
-				}
-			}
-			fmt.Println()
-			t.PrintInfo("Usage: /memory search <query>")
+			return
 		}
+		t.PrintInfo(fmt.Sprintf("📚 Knowledge base: %d entries", store.Count()))
+		recent := store.GetRecent(5)
+		if len(recent) > 0 {
+			t.PrintInfo("Recent learnings:")
+			for _, e := range recent {
+				fmt.Printf("  [%s] %s \033[90m(from %s)\033[0m\n", e.Type, e.Content, e.Source)
+			}
+		}
+		fmt.Println()
+		t.PrintInfo("Usage: /memory search <query>")
 
+	// ── Import from Antigravity ─────────────────────────────────────────────
 	case "/import":
 		if store == nil {
 			t.PrintWarning("Memory system not available")
-			return true
+			return
 		}
-		t.PrintInfo("Importing from Antigravity CLI...")
+		t.PrintInfo("Importing from Antigravity CLI…")
 		count, err := memory.ImportFromAntigravity(store)
 		if err != nil {
 			t.PrintError(err)
@@ -339,30 +358,78 @@ func handleCommand(input string, ag *agent.Agent, t *ui.TerminalUI, model *strin
 			t.PrintSuccess(fmt.Sprintf("Imported %d new entries (total: %d)", count, store.Count()))
 		}
 
+	// ── History ─────────────────────────────────────────────────────────────
 	case "/history":
-		t.PrintInfo("Conversation history:")
+		t.PrintInfo("Conversation history (JSON):")
 		fmt.Println(ag.HistoryJSON())
 
-	case "/help":
-		t.PrintInfo("Available commands:")
-		t.PrintInfo("  /help              Show this help")
-		t.PrintInfo("  /exit, /quit, /q   Exit pitty")
-		t.PrintInfo("  /clear, /reset     Clear conversation history")
-		t.PrintInfo("  /model <name>      Switch model")
-		t.PrintInfo("  /models            List available models")
-		t.PrintInfo("  /learn <text>      Teach pitty something to remember")
-		t.PrintInfo("  /memory            Show knowledge base status")
-		t.PrintInfo("  /memory search <q> Search knowledge base")
-		t.PrintInfo("  /import            Import from Antigravity CLI")
-		t.PrintInfo("  /history           Show conversation history")
-		t.PrintInfo("")
-		t.PrintInfo("Tips:")
-		t.PrintInfo("  Use \\ at end of line for multiline input")
-		t.PrintInfo("  Ctrl+C to interrupt")
-		t.PrintInfo("  pitty auto-learns from your interactions 🧠")
+	// ── Token estimate ──────────────────────────────────────────────────────
+	case "/tokens":
+		est := ag.TokenEstimate()
+		t.PrintInfo(fmt.Sprintf("Estimated tokens in context: ~%d", est))
+		if est > 6000 {
+			t.PrintWarning("Context is getting large. Consider /compact or /clear.")
+		}
 
+	// ── Compact conversation ────────────────────────────────────────────────
+	case "/compact":
+		history := ag.GetHistory()
+		if len(history) == 0 {
+			t.PrintInfo("No conversation to compact.")
+			return
+		}
+		// Build a summary prompt
+		var sb strings.Builder
+		sb.WriteString("Summarize the following conversation into a concise bullet-point list of key decisions, code changes, and facts. Be brief:\n\n")
+		for _, msg := range history {
+			if msg.Role == "system" {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("[%s]: %s\n\n", msg.Role, msg.Content))
+		}
+		t.PrintInfo("Compacting conversation…")
+		t.StartThinking()
+
+		firstChunk := true
+		var summary strings.Builder
+		onChunk := func(chunk string) {
+			if firstChunk {
+				t.StopThinking()
+				t.PrintStreamStart()
+				firstChunk = false
+			}
+			t.PrintStreaming(chunk)
+			summary.WriteString(chunk)
+		}
+
+		ag.Reset()
+		var chatErr error
+		if noTools {
+			chatErr = ag.ChatSimple(ctx, sb.String(), onChunk)
+		} else {
+			chatErr = ag.Chat(ctx, sb.String(), onChunk)
+		}
+		t.StopThinking()
+		if !firstChunk {
+			t.PrintStreamEnd()
+		}
+		if chatErr != nil {
+			t.PrintError(chatErr)
+			return
+		}
+		// Reset and inject compact summary as initial context
+		ag.Reset()
+		if learner != nil && summary.Len() > 0 {
+			learner.LearnFact("Conversation summary: "+summary.String(), "compact command", []string{"summary", "compact"})
+		}
+		t.PrintSuccess("Conversation compacted. History cleared and summary saved to memory.")
+
+	// ── Help ────────────────────────────────────────────────────────────────
+	case "/help":
+		t.PrintHelp()
+
+	// ── Unknown ─────────────────────────────────────────────────────────────
 	default:
-		t.PrintInfo("Unknown command: " + cmd + ". Type /help for available commands.")
+		t.PrintInfo(fmt.Sprintf("Unknown command: %s  (type /help for available commands)", cmd))
 	}
-	return true
 }

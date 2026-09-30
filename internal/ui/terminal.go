@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// ANSI color/style codes matching Antigravity CLI
+// ANSI color/style codes.
 const (
 	reset     = "\033[0m"
 	bold      = "\033[1m"
@@ -23,17 +23,17 @@ const (
 	cyan      = "\033[36m"
 	white     = "\033[37m"
 	gray      = "\033[90m"
-	bgBlue    = "\033[44m"
 	clearLine = "\033[2K\r"
 )
 
-// Spinner frames for thinking animation
+// Spinner frames — Braille dots like AGY.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// TerminalUI handles all terminal I/O styled like Antigravity CLI.
+// TerminalUI handles all terminal I/O in the style of Antigravity CLI.
 type TerminalUI struct {
 	reader      *bufio.Reader
 	spinnerStop chan struct{}
+	spinnerDone chan struct{} // closed when spinner goroutine exits
 	spinnerMu   sync.Mutex
 	spinning    bool
 }
@@ -45,9 +45,10 @@ func NewTerminalUI() *TerminalUI {
 	}
 }
 
-// PrintWelcome prints the welcome banner matching Antigravity CLI style.
-func (t *TerminalUI) PrintWelcome(model, ollamaURL string) {
-	// Get current working directory for workspace display
+// ── Welcome ───────────────────────────────────────────────────────────────────
+
+// PrintWelcome prints the startup banner (AGY-style).
+func (t *TerminalUI) PrintWelcome(model, ollamaURL string, memCount int) {
 	cwd, _ := os.Getwd()
 	if cwd == "" {
 		cwd = "."
@@ -55,82 +56,102 @@ func (t *TerminalUI) PrintWelcome(model, ollamaURL string) {
 
 	fmt.Println()
 	fmt.Printf("%s%s ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ %s\n", bold, gray, reset)
-	fmt.Printf("%s%s ✦ pitty%s %sv0.1.0%s\n", bold, magenta, reset, gray, reset)
+	fmt.Printf("%s%s ✦ pitty%s %sv0.2.0%s  %s— local AI coding assistant%s\n", bold, magenta, reset, gray, reset, dim, reset)
 	fmt.Printf("%s ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ %s\n", gray, reset)
 	fmt.Println()
 	fmt.Printf("  %sModel%s      %s%s%s\n", gray, reset, white, model, reset)
 	fmt.Printf("  %sProvider%s   %s%s%s\n", gray, reset, white, ollamaURL, reset)
 	fmt.Printf("  %sWorkspace%s  %s%s%s\n", gray, reset, white, cwd, reset)
+	if memCount > 0 {
+		fmt.Printf("  %sMemory%s     %s📚 %d entries%s\n", gray, reset, cyan, memCount, reset)
+	}
 	fmt.Println()
-	fmt.Printf("  %sType %s/help%s%s for commands • %s/exit%s%s to quit%s\n", gray, white, gray, reset, white, gray, reset, reset)
+	fmt.Printf("  %sType %s/help%s%s for commands • %s/exit%s%s to quit%s\n",
+		gray, white, gray, reset, white, gray, reset, reset)
 	fmt.Printf("%s ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ %s\n", gray, reset)
 	fmt.Println()
 }
 
-// PrintStreaming prints a streaming chunk (no newline, no prefix).
-func (t *TerminalUI) PrintStreaming(chunk string) {
-	fmt.Print(chunk)
-}
+// ── Streaming output ──────────────────────────────────────────────────────────
 
-// PrintStreamStart prints the assistant response prefix before streaming begins.
+// PrintStreamStart prints the assistant prefix before streaming.
 func (t *TerminalUI) PrintStreamStart() {
 	fmt.Printf("\n%s%s✦%s ", bold, magenta, reset)
 }
 
-// PrintStreamEnd ends a streaming output.
+// PrintStreaming writes a streaming chunk directly (no newline).
+func (t *TerminalUI) PrintStreaming(chunk string) {
+	fmt.Print(chunk)
+}
+
+// PrintStreamEnd finalizes streaming output with newlines.
 func (t *TerminalUI) PrintStreamEnd() {
 	fmt.Println()
 	fmt.Println()
 }
 
-// PrintToolCall prints info about a tool being called (Antigravity style).
+// PrintAssistant prints a complete (non-streamed) assistant response.
+func (t *TerminalUI) PrintAssistant(text string) {
+	fmt.Printf("\n%s%s✦%s %s\n\n", bold, magenta, reset, text)
+}
+
+// ── Tool display ──────────────────────────────────────────────────────────────
+
+// PrintToolCall displays a tool being invoked (AGY-style).
 func (t *TerminalUI) PrintToolCall(name string, args map[string]interface{}) {
-	// Format: 🔧 ToolName  summary
-	summary := t.formatToolSummary(name, args)
-	fmt.Printf("\n  %s%s🔧 %s%s", bold, yellow, name, reset)
+	summary := formatToolSummary(name, args)
+	icon := toolIcon(name)
+	fmt.Printf("\n  %s%s%s %s%s%s", bold, yellow, icon+" "+name, reset, gray, reset)
 	if summary != "" {
-		fmt.Printf("  %s%s%s", gray, summary, reset)
+		fmt.Printf("  %s%s%s", dim, summary, reset)
 	}
 	fmt.Println()
 }
 
-// PrintToolResult prints the result of a tool call.
+// PrintToolResult displays the result of a tool call.
 func (t *TerminalUI) PrintToolResult(name string, result string) {
-	fmt.Printf("  %s✓ Done%s %s(%d chars)%s\n", green, reset, gray, len(result), reset)
+	lines := strings.Count(result, "\n") + 1
+	fmt.Printf("  %s✓%s %s%s — %d lines%s\n", green, reset, gray, name, lines, reset)
 }
 
-// PrintError prints an error message.
+// ── Status messages ───────────────────────────────────────────────────────────
+
 func (t *TerminalUI) PrintError(err error) {
 	fmt.Printf("\n%s%s✗ Error:%s %s%v%s\n\n", bold, red, reset, red, err, reset)
 }
 
-// PrintInfo prints an info/dim message.
 func (t *TerminalUI) PrintInfo(text string) {
 	fmt.Printf("%s%s%s\n", gray, text, reset)
 }
 
-// PrintSuccess prints a success message.
 func (t *TerminalUI) PrintSuccess(text string) {
 	fmt.Printf("%s%s✓ %s%s\n", bold, green, text, reset)
 }
 
-// PrintWarning prints a warning message.
 func (t *TerminalUI) PrintWarning(text string) {
 	fmt.Printf("%s%s⚠ %s%s\n", bold, yellow, text, reset)
 }
 
-// StartThinking starts the thinking spinner animation.
+func (t *TerminalUI) PrintSeparator() {
+	fmt.Printf("%s  ──────────────────────────────────────────────────%s\n", gray, reset)
+}
+
+// ── Spinner ───────────────────────────────────────────────────────────────────
+
+// StartThinking starts the animated "Thinking…" spinner.
+// Uses a done channel so StopThinking waits for the goroutine to exit cleanly.
 func (t *TerminalUI) StartThinking() {
 	t.spinnerMu.Lock()
+	defer t.spinnerMu.Unlock()
 	if t.spinning {
-		t.spinnerMu.Unlock()
 		return
 	}
 	t.spinning = true
 	t.spinnerStop = make(chan struct{})
-	t.spinnerMu.Unlock()
+	t.spinnerDone = make(chan struct{})
 
 	go func() {
+		defer close(t.spinnerDone)
 		i := 0
 		for {
 			select {
@@ -139,7 +160,7 @@ func (t *TerminalUI) StartThinking() {
 				return
 			default:
 				frame := spinnerFrames[i%len(spinnerFrames)]
-				fmt.Printf("%s  %s%s Thinking...%s", clearLine, magenta, frame, reset)
+				fmt.Printf("%s  %s%s Thinking…%s", clearLine, magenta, frame, reset)
 				i++
 				time.Sleep(80 * time.Millisecond)
 			}
@@ -147,18 +168,23 @@ func (t *TerminalUI) StartThinking() {
 	}()
 }
 
-// StopThinking stops the thinking spinner animation.
+// StopThinking stops the spinner and waits for its goroutine to finish.
 func (t *TerminalUI) StopThinking() {
 	t.spinnerMu.Lock()
-	defer t.spinnerMu.Unlock()
-	if t.spinning {
-		close(t.spinnerStop)
-		t.spinning = false
-		time.Sleep(100 * time.Millisecond) // Let spinner goroutine clean up
+	if !t.spinning {
+		t.spinnerMu.Unlock()
+		return
 	}
+	close(t.spinnerStop)
+	done := t.spinnerDone
+	t.spinning = false
+	t.spinnerMu.Unlock()
+	<-done // wait for goroutine to clear the line
 }
 
-// ReadInput reads a line of input from the user, supporting \ for continuation.
+// ── Input ─────────────────────────────────────────────────────────────────────
+
+// ReadInput reads user input with multi-line support (trailing \\ continues).
 func (t *TerminalUI) ReadInput() (string, error) {
 	var input strings.Builder
 	first := true
@@ -178,7 +204,7 @@ func (t *TerminalUI) ReadInput() (string, error) {
 
 		if strings.HasSuffix(line, "\\") {
 			input.WriteString(strings.TrimSuffix(line, "\\"))
-			input.WriteString("\n")
+			input.WriteRune('\n')
 			continue
 		}
 		input.WriteString(line)
@@ -187,51 +213,93 @@ func (t *TerminalUI) ReadInput() (string, error) {
 	return strings.TrimSpace(input.String()), nil
 }
 
-// PrintSeparator prints a subtle separator line.
-func (t *TerminalUI) PrintSeparator() {
-	fmt.Printf("%s  ──────────────────────────────────────────────────%s\n", gray, reset)
+// PrintUser echoes a user message (no-op: already shown via ReadInput prompt).
+func (t *TerminalUI) PrintUser(_ string) {}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+func toolIcon(name string) string {
+	icons := map[string]string{
+		"read_file":      "📄",
+		"write_file":     "✏️",
+		"edit_file":      "🔧",
+		"run_command":    "⚡",
+		"search_files":   "🔍",
+		"list_directory": "📁",
+		"web_search":     "🌐",
+	}
+	if icon, ok := icons[name]; ok {
+		return icon
+	}
+	return "🔧"
 }
 
-// formatToolSummary creates a brief summary of tool args for display.
-func (t *TerminalUI) formatToolSummary(name string, args map[string]interface{}) string {
+func formatToolSummary(name string, args map[string]interface{}) string {
 	switch name {
-	case "read_file":
+	case "read_file", "write_file", "edit_file":
 		if p, ok := args["path"].(string); ok {
-			return p
-		}
-	case "write_file":
-		if p, ok := args["path"].(string); ok {
-			return p
-		}
-	case "edit_file":
-		if p, ok := args["path"].(string); ok {
-			return p
+			return shortenPath(p)
 		}
 	case "run_command":
 		if c, ok := args["command"].(string); ok {
-			if len(c) > 60 {
-				return c[:60] + "..."
+			if len(c) > 70 {
+				return c[:70] + "…"
 			}
 			return c
 		}
 	case "search_files":
 		if p, ok := args["pattern"].(string); ok {
-			return p
+			return fmt.Sprintf("/%s/", p)
 		}
 	case "list_directory":
 		if p, ok := args["path"].(string); ok {
-			return p
+			return shortenPath(p)
+		}
+	case "web_search":
+		if q, ok := args["query"].(string); ok {
+			return q
 		}
 	}
 	return ""
 }
 
-// PrintAssistant prints a full assistant response (non-streaming).
-func (t *TerminalUI) PrintAssistant(text string) {
-	fmt.Printf("\n%s%s✦%s %s\n\n", bold, magenta, reset, text)
+// shortenPath abbreviates long paths for display.
+func shortenPath(path string) string {
+	home, _ := os.UserHomeDir()
+	if home != "" && strings.HasPrefix(path, home) {
+		path = "~" + path[len(home):]
+	}
+	if len(path) > 60 {
+		return "…" + path[len(path)-57:]
+	}
+	return path
 }
 
-// PrintUser echoes user input (optional, for logging).
-func (t *TerminalUI) PrintUser(text string) {
-	// Antigravity CLI doesn't echo user input, it's already shown via ReadInput
+// PrintHelp displays the help text — defined here so it's near the UI layer.
+func (t *TerminalUI) PrintHelp() {
+	_ = dim // ensure const is used
+	fmt.Printf("\n%s%sAvailable commands:%s\n", bold, white, reset)
+	cmds := [][2]string{
+		{"/help", "Show this help"},
+		{"/exit, /quit, /q", "Exit pitty"},
+		{"/clear, /reset", "Clear conversation history"},
+		{"/model <name>", "Switch Ollama model"},
+		{"/models", "List available models"},
+		{"/learn <text>", "Teach pitty something to remember"},
+		{"/memory", "Show knowledge base status"},
+		{"/memory search <q>", "Search knowledge base"},
+		{"/import", "Import knowledge from Antigravity CLI"},
+		{"/history", "Show conversation history (JSON)"},
+		{"/tokens", "Show estimated token usage"},
+		{"/compact", "Summarize and compact conversation history"},
+	}
+	for _, c := range cmds {
+		fmt.Printf("  %s%s%-22s%s  %s%s%s\n", bold, cyan, c[0], reset, gray, c[1], reset)
+	}
+	fmt.Println()
+	fmt.Printf("  %sTips:%s\n", bold, reset)
+	fmt.Printf("  %s• Use \\ at end of line for multi-line input%s\n", gray, reset)
+	fmt.Printf("  %s• Ctrl+C to interrupt generation%s\n", gray, reset)
+	fmt.Printf("  %s• pitty auto-learns from your interactions 🧠%s\n", gray, reset)
+	fmt.Println()
 }

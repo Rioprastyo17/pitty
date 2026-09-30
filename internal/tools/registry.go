@@ -5,7 +5,7 @@ import (
 	"sort"
 )
 
-// ToolParam describes a parameter for a tool.
+// ToolParam describes a single parameter for a tool.
 type ToolParam struct {
 	Type        string   `json:"type"`
 	Description string   `json:"description"`
@@ -13,7 +13,7 @@ type ToolParam struct {
 	Enum        []string `json:"enum,omitempty"`
 }
 
-// ToolHandler is the interface that all tools must implement.
+// ToolHandler is the interface all tools must implement.
 type ToolHandler interface {
 	Name() string
 	Description() string
@@ -27,11 +27,9 @@ type Registry struct {
 	tools map[string]ToolHandler
 }
 
-// NewRegistry creates a new tool registry.
+// NewRegistry creates an empty tool registry.
 func NewRegistry() *Registry {
-	return &Registry{
-		tools: make(map[string]ToolHandler),
-	}
+	return &Registry{tools: make(map[string]ToolHandler)}
 }
 
 // Register adds a tool to the registry.
@@ -57,7 +55,12 @@ func (r *Registry) List() []ToolHandler {
 	return handlers
 }
 
-// ToOllamaTools converts all registered tools to the Ollama tools format.
+// Len returns the number of registered tools.
+func (r *Registry) Len() int {
+	return len(r.tools)
+}
+
+// ToOllamaTools converts all registered tools to Ollama's JSON tool format.
 func (r *Registry) ToOllamaTools() []map[string]interface{} {
 	var ollamaTools []map[string]interface{}
 	for _, handler := range r.List() {
@@ -72,8 +75,7 @@ func (r *Registry) ToOllamaTools() []map[string]interface{} {
 			}
 			properties[pName] = prop
 		}
-
-		tool := map[string]interface{}{
+		ollamaTools = append(ollamaTools, map[string]interface{}{
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        handler.Name(),
@@ -84,8 +86,7 @@ func (r *Registry) ToOllamaTools() []map[string]interface{} {
 					"required":   handler.RequiredParams(),
 				},
 			},
-		}
-		ollamaTools = append(ollamaTools, tool)
+		})
 	}
 	return ollamaTools
 }
