@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/pitty/pitty/internal/memory"
@@ -140,6 +141,11 @@ func (a *Agent) Chat(ctx context.Context, userMessage string, onChunk func(strin
 			}
 
 			finalContent := fullContent.String()
+
+			// Fallback: extract tool calls from markdown if native tools weren't populated
+			if len(toolCalls) == 0 && finalContent != "" {
+				toolCalls = extractToolCallsFromText(finalContent, a.registry)
+			}
 
 			// If the model returned tool calls, execute them and loop.
 			if len(toolCalls) > 0 {
@@ -299,3 +305,30 @@ func (a *Agent) TokenEstimate() int {
 	return total
 }
 
+
+var toolBlockRegex = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?\\})\\s*```")
+
+// extractToolCallsFromText looks for JSON blocks in markdown that match a tool call schema.
+// This acts as a fallback for smaller models that fail to use native tool calling.
+func extractToolCallsFromText(content string, registry *tools.Registry) []ollama.ToolCall {
+	var calls []ollama.ToolCall
+	matches := toolBlockRegex.FindAllStringSubmatch(content, -1)
+	for _, match := range matches {
+		var parsed struct {
+			Name      string                 `json:"name"`
+			Arguments map[string]interface{} `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(match[1]), &parsed); err == nil {
+			// Only extract if it's a known tool
+			if _, ok := registry.Get(parsed.Name); ok {
+				calls = append(calls, ollama.ToolCall{
+					Function: ollama.ToolFunction{
+						Name:      parsed.Name,
+						Arguments: parsed.Arguments,
+					},
+				})
+			}
+		}
+	}
+	return calls
+}
