@@ -137,7 +137,7 @@ func (a *Agent) Chat(ctx context.Context, userMessage string, onChunk func(strin
 
 	a.history = append(a.history, llm.Message{Role: "user", Content: userMessage})
 
-	const maxIterations = 15
+	const maxIterations = 5
 	for i := 0; i < maxIterations; i++ {
 		messages := a.buildMessages()
 
