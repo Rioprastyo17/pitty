@@ -329,6 +329,8 @@ var toolBlockRegex = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?\\})\\s*```"
 // This acts as a fallback for smaller models that fail to use native tool calling.
 func extractToolCallsFromText(content string, registry *tools.Registry) []llm.ToolCall {
 	var calls []llm.ToolCall
+	seen := make(map[string]bool)
+
 	matches := toolBlockRegex.FindAllStringSubmatch(content, -1)
 	for _, match := range matches {
 		var parsed struct {
@@ -338,12 +340,19 @@ func extractToolCallsFromText(content string, registry *tools.Registry) []llm.To
 		if err := json.Unmarshal([]byte(match[1]), &parsed); err == nil {
 			// Only extract if it's a known tool
 			if _, ok := registry.Get(parsed.Name); ok {
-				calls = append(calls, llm.ToolCall{
-					Function: llm.ToolFunction{
-						Name:      parsed.Name,
-						Arguments: parsed.Arguments,
-					},
-				})
+				// Deduplicate identical tool calls (order-independent)
+				normalizedBytes, _ := json.Marshal(parsed)
+				callFingerprint := string(normalizedBytes)
+
+				if !seen[callFingerprint] {
+					seen[callFingerprint] = true
+					calls = append(calls, llm.ToolCall{
+						Function: llm.ToolFunction{
+							Name:      parsed.Name,
+							Arguments: parsed.Arguments,
+						},
+					})
+				}
 			}
 		}
 	}
