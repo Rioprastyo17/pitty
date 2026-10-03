@@ -48,7 +48,7 @@ func NewTerminalUI() *TerminalUI {
 // ── Welcome ───────────────────────────────────────────────────────────────────
 
 // PrintWelcome prints the startup banner (AGY-style).
-func (t *TerminalUI) PrintWelcome(model, ollamaURL string, memCount int) {
+func (t *TerminalUI) PrintWelcome(model, provider string, memCount int) {
 	cwd, _ := os.Getwd()
 	if cwd == "" {
 		cwd = "."
@@ -56,11 +56,11 @@ func (t *TerminalUI) PrintWelcome(model, ollamaURL string, memCount int) {
 
 	fmt.Println()
 	fmt.Printf("%s%s ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ %s\n", bold, gray, reset)
-	fmt.Printf("%s%s ✦ pitty%s %sv0.2.0%s  %s— local AI coding assistant%s\n", bold, magenta, reset, gray, reset, dim, reset)
+	fmt.Printf("%s%s ✦ pitty%s %sv0.3.0%s  %s— AI coding assistant%s\n", bold, magenta, reset, gray, reset, dim, reset)
 	fmt.Printf("%s ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ %s\n", gray, reset)
 	fmt.Println()
 	fmt.Printf("  %sModel%s      %s%s%s\n", gray, reset, white, model, reset)
-	fmt.Printf("  %sProvider%s   %s%s%s\n", gray, reset, white, ollamaURL, reset)
+	fmt.Printf("  %sProvider%s   %s%s%s\n", gray, reset, white, provider, reset)
 	fmt.Printf("  %sWorkspace%s  %s%s%s\n", gray, reset, white, cwd, reset)
 	if memCount > 0 {
 		fmt.Printf("  %sMemory%s     %s📚 %d entries%s\n", gray, reset, cyan, memCount, reset)
@@ -283,8 +283,9 @@ func (t *TerminalUI) PrintHelp() {
 		{"/help", "Show this help"},
 		{"/exit, /quit, /q", "Exit pitty"},
 		{"/clear, /reset", "Clear conversation history"},
-		{"/model <name>", "Switch Ollama model"},
-		{"/models", "List available models"},
+		{"/model <name>", "Switch model"},
+		{"/models", "List available models for current provider"},
+		{"/provider <name> [model]", "Switch AI provider (llamacpp|openai|anthropic|gemini|groq|…)"},
 		{"/learn <text>", "Teach pitty something to remember"},
 		{"/memory", "Show knowledge base status"},
 		{"/memory search <q>", "Search knowledge base"},

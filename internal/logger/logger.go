@@ -34,6 +34,7 @@ var levelNames = map[Level]string{
 type Logger struct {
 	mu       sync.Mutex
 	file     *os.File
+	errFile  *os.File
 	filePath string
 	writer   io.Writer
 	minLevel Level
@@ -63,10 +64,14 @@ func Init(minLevel Level) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("open log file: %w", err)
 	}
+	
+	// Open error.log in current working directory for error-level logs
+	errFile, _ := os.OpenFile("error.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 
 	session := fmt.Sprintf("%x", time.Now().UnixNano())[:8]
 	defaultLogger = &Logger{
 		file:     f,
+		errFile:  errFile,
 		filePath: logPath,
 		writer:   f,
 		minLevel: minLevel,
@@ -85,6 +90,10 @@ func Close() {
 		defaultLogger.writeRaw(LevelInfo, "=== session ended ===")
 		_ = defaultLogger.file.Sync()
 		_ = defaultLogger.file.Close()
+		if defaultLogger.errFile != nil {
+			_ = defaultLogger.errFile.Sync()
+			_ = defaultLogger.errFile.Close()
+		}
 	}
 }
 
@@ -94,6 +103,14 @@ func FilePath() string {
 		return ""
 	}
 	return defaultLogger.filePath
+}
+
+// ErrorFilePath returns the current error log file path, if any.
+func ErrorFilePath() string {
+	if defaultLogger == nil || defaultLogger.errFile == nil {
+		return ""
+	}
+	return defaultLogger.errFile.Name()
 }
 
 // ── Level-named package-level helpers ─────────────────────────────────────────
@@ -231,6 +248,10 @@ func (l *Logger) writeRaw(level Level, msg string) {
 	caller := callerInfo(4)
 	line := fmt.Sprintf("%s [%-5s] [%s] %s: %s\n", ts, levelStr, l.session, caller, msg)
 	_, _ = l.writer.Write([]byte(line))
+	
+	if l.errFile != nil && (level == LevelError || level == LevelFatal) {
+		_, _ = l.errFile.Write([]byte(line))
+	}
 }
 
 // callerInfo returns "file:line" of the caller at the given stack depth.

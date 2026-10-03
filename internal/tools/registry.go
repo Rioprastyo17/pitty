@@ -60,33 +60,4 @@ func (r *Registry) Len() int {
 	return len(r.tools)
 }
 
-// ToOllamaTools converts all registered tools to Ollama's JSON tool format.
-func (r *Registry) ToOllamaTools() []map[string]interface{} {
-	var ollamaTools []map[string]interface{}
-	for _, handler := range r.List() {
-		properties := make(map[string]interface{})
-		for pName, p := range handler.Parameters() {
-			prop := map[string]interface{}{
-				"type":        p.Type,
-				"description": p.Description,
-			}
-			if len(p.Enum) > 0 {
-				prop["enum"] = p.Enum
-			}
-			properties[pName] = prop
-		}
-		ollamaTools = append(ollamaTools, map[string]interface{}{
-			"type": "function",
-			"function": map[string]interface{}{
-				"name":        handler.Name(),
-				"description": handler.Description(),
-				"parameters": map[string]interface{}{
-					"type":       "object",
-					"properties": properties,
-					"required":   handler.RequiredParams(),
-				},
-			},
-		})
-	}
-	return ollamaTools
-}
+

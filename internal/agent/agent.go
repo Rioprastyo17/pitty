@@ -7,20 +7,20 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/pitty/pitty/internal/llm"
 	"github.com/pitty/pitty/internal/memory"
-	"github.com/pitty/pitty/internal/ollama"
 	"github.com/pitty/pitty/internal/tools"
 )
 
 // Agent orchestrates chat, tool calling, memory, and streaming.
 type Agent struct {
-	client         *ollama.Client
+	provider       llm.Provider
 	registry       *tools.Registry
 	model          string
 	temperature    float64
 	maxTokens      int
 	systemPrompt   string
-	history        []ollama.Message
+	history        []llm.Message
 	onToolCall     func(name string, args map[string]interface{})
 	onToolResult   func(name string, result string)
 	memStore       *memory.Store
@@ -28,10 +28,10 @@ type Agent struct {
 	toolsSupported bool // tracks whether the current model supports tool calling
 }
 
-// NewAgent creates a new Agent with tool support enabled by default.
-func NewAgent(client *ollama.Client, registry *tools.Registry, model string, temp float64, maxTokens int) *Agent {
+// NewAgent creates a new Agent with the given provider.
+func NewAgent(provider llm.Provider, registry *tools.Registry, model string, temp float64, maxTokens int) *Agent {
 	return &Agent{
-		client:         client,
+		provider:       provider,
 		registry:       registry,
 		model:          model,
 		temperature:    temp,
@@ -58,6 +58,17 @@ func (a *Agent) SetModel(model string) {
 	a.toolsSupported = true // reset detection for new model
 }
 
+// SetProvider swaps the underlying AI provider at runtime.
+func (a *Agent) SetProvider(provider llm.Provider) {
+	a.provider = provider
+	a.toolsSupported = true
+}
+
+// Provider returns the current provider name.
+func (a *Agent) Provider() string {
+	return a.provider.Name()
+}
+
 // OnToolCall sets a callback triggered before a tool executes.
 func (a *Agent) OnToolCall(fn func(name string, args map[string]interface{})) {
 	a.onToolCall = fn
@@ -69,7 +80,7 @@ func (a *Agent) OnToolResult(fn func(name string, result string)) {
 }
 
 // buildMessages assembles the full message list: system prompt + memory context + history.
-func (a *Agent) buildMessages() []ollama.Message {
+func (a *Agent) buildMessages() []llm.Message {
 	sysPrompt := a.systemPrompt
 
 	// Inject relevant memory context based on the most recent user message.
@@ -88,10 +99,32 @@ func (a *Agent) buildMessages() []ollama.Message {
 		}
 	}
 
-	msgs := make([]ollama.Message, 0, len(a.history)+1)
-	msgs = append(msgs, ollama.Message{Role: "system", Content: sysPrompt})
+	msgs := make([]llm.Message, 0, len(a.history)+1)
+	msgs = append(msgs, llm.Message{Role: "system", Content: sysPrompt})
 	msgs = append(msgs, a.history...)
 	return msgs
+}
+
+// buildToolDefs converts the registry into llm.ToolDefinition slice.
+func (a *Agent) buildToolDefs() []llm.ToolDefinition {
+	var defs []llm.ToolDefinition
+	for _, h := range a.registry.List() {
+		params := make(map[string]llm.ToolParam)
+		for k, v := range h.Parameters() {
+			params[k] = llm.ToolParam{
+				Type:        v.Type,
+				Description: v.Description,
+				Enum:        v.Enum,
+			}
+		}
+		defs = append(defs, llm.ToolDefinition{
+			Name:        h.Name(),
+			Description: h.Description(),
+			Parameters:  params,
+			Required:    h.RequiredParams(),
+		})
+	}
+	return defs
 }
 
 // Chat processes a user message with the full tool-calling agentic loop.
@@ -102,7 +135,7 @@ func (a *Agent) Chat(ctx context.Context, userMessage string, onChunk func(strin
 		a.learner.LearnFromUserMessage(userMessage)
 	}
 
-	a.history = append(a.history, ollama.Message{Role: "user", Content: userMessage})
+	a.history = append(a.history, llm.Message{Role: "user", Content: userMessage})
 
 	const maxIterations = 15
 	for i := 0; i < maxIterations; i++ {
@@ -110,37 +143,26 @@ func (a *Agent) Chat(ctx context.Context, userMessage string, onChunk func(strin
 
 		// --- Tool-calling branch ---
 		if a.toolsSupported && a.registry.Len() > 0 {
-			var fullContent strings.Builder
-			var toolCalls []ollama.ToolCall
+			req := llm.ChatRequest{
+				Model:       a.model,
+				Messages:    messages,
+				Temperature: a.temperature,
+				MaxTokens:   a.maxTokens,
+				Tools:       a.buildToolDefs(),
+			}
 
-			err := a.client.ChatStream(ctx, ollama.ChatRequest{
-				Model:    a.model,
-				Messages: messages,
-				Tools:    a.registry.ToOllamaTools(),
-				Options: &ollama.ChatOptions{
-					Temperature: a.temperature,
-					NumPredict:  a.maxTokens,
-				},
-			}, func(chunk ollama.ChatStreamChunk) {
-				if chunk.Message.Content != "" {
-					onChunk(chunk.Message.Content)
-					fullContent.WriteString(chunk.Message.Content)
-				}
-				if len(chunk.Message.ToolCalls) > 0 {
-					toolCalls = chunk.Message.ToolCalls
-				}
-			})
-
+			resp, err := a.provider.ChatStream(ctx, req, onChunk)
 			if err != nil {
 				if isToolUnsupportedError(err) {
-					// Model doesn't support tools — fall back to streaming forever.
+					// Model doesn't support tools — fall back to streaming only.
 					a.toolsSupported = false
 					return a.streamResponse(ctx, messages, onChunk)
 				}
 				return fmt.Errorf("chat: %w", err)
 			}
 
-			finalContent := fullContent.String()
+			toolCalls := resp.Message.ToolCalls
+			finalContent := resp.Message.Content
 
 			// Fallback: extract tool calls from markdown if native tools weren't populated
 			if len(toolCalls) == 0 && finalContent != "" {
@@ -149,7 +171,7 @@ func (a *Agent) Chat(ctx context.Context, userMessage string, onChunk func(strin
 
 			// If the model returned tool calls, execute them and loop.
 			if len(toolCalls) > 0 {
-				a.history = append(a.history, ollama.Message{
+				a.history = append(a.history, llm.Message{
 					Role:      "assistant",
 					Content:   finalContent,
 					ToolCalls: toolCalls,
@@ -162,7 +184,7 @@ func (a *Agent) Chat(ctx context.Context, userMessage string, onChunk func(strin
 
 			// No tool calls — the model gave a final text response.
 			if finalContent != "" {
-				a.history = append(a.history, ollama.Message{
+				a.history = append(a.history, llm.Message{
 					Role:    "assistant",
 					Content: finalContent,
 				})
@@ -182,27 +204,22 @@ func (a *Agent) Chat(ctx context.Context, userMessage string, onChunk func(strin
 }
 
 // streamResponse sends a streaming chat request and pipes chunks to onChunk.
-func (a *Agent) streamResponse(ctx context.Context, messages []ollama.Message, onChunk func(string)) error {
-	var full strings.Builder
+func (a *Agent) streamResponse(ctx context.Context, messages []llm.Message, onChunk func(string)) error {
+	req := llm.ChatRequest{
+		Model:       a.model,
+		Messages:    messages,
+		Temperature: a.temperature,
+		MaxTokens:   a.maxTokens,
+	}
 
-	err := a.client.ChatStream(ctx, ollama.ChatRequest{
-		Model:    a.model,
-		Messages: messages,
-		Options: &ollama.ChatOptions{
-			Temperature: a.temperature,
-			NumPredict:  a.maxTokens,
-		},
-	}, func(chunk ollama.ChatStreamChunk) {
-		onChunk(chunk.Message.Content)
-		full.WriteString(chunk.Message.Content)
-	})
+	resp, err := a.provider.ChatStream(ctx, req, onChunk)
 	if err != nil {
 		return fmt.Errorf("stream: %w", err)
 	}
 
-	finalContent := full.String()
-	a.history = append(a.history, ollama.Message{Role: "assistant", Content: finalContent})
-	
+	finalContent := resp.Message.Content
+	a.history = append(a.history, llm.Message{Role: "assistant", Content: finalContent})
+
 	// Auto-learn from streaming response.
 	if a.learner != nil {
 		lastUser := ""
@@ -220,7 +237,7 @@ func (a *Agent) streamResponse(ctx context.Context, messages []ollama.Message, o
 }
 
 // executeToolCalls runs each tool call and appends results to history.
-func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []ollama.ToolCall, userMessage string) error {
+func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []llm.ToolCall, userMessage string) error {
 	for _, tc := range toolCalls {
 		if a.onToolCall != nil {
 			a.onToolCall(tc.Function.Name, tc.Function.Arguments)
@@ -244,7 +261,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []ollama.ToolCal
 			a.onToolResult(tc.Function.Name, display)
 		}
 
-		a.history = append(a.history, ollama.Message{
+		a.history = append(a.history, llm.Message{
 			Role:    "tool",
 			Content: result,
 		})
@@ -263,7 +280,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]in
 
 // ChatSimple streams a response without any tool calling.
 func (a *Agent) ChatSimple(ctx context.Context, userMessage string, onChunk func(string)) error {
-	a.history = append(a.history, ollama.Message{Role: "user", Content: userMessage})
+	a.history = append(a.history, llm.Message{Role: "user", Content: userMessage})
 	messages := a.buildMessages()
 	return a.streamResponse(ctx, messages, onChunk)
 }
@@ -274,7 +291,7 @@ func (a *Agent) Reset() {
 }
 
 // GetHistory returns the raw conversation history.
-func (a *Agent) GetHistory() []ollama.Message {
+func (a *Agent) GetHistory() []llm.Message {
 	return a.history
 }
 
@@ -287,14 +304,6 @@ func (a *Agent) HistoryJSON() string {
 	return string(data)
 }
 
-// isToolUnsupportedError returns true when Ollama rejects the tools parameter.
-func isToolUnsupportedError(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "does not support tools") ||
-		(strings.Contains(msg, "tool") && strings.Contains(msg, "400")) ||
-		strings.Contains(msg, "status 400")
-}
-
 // TokenEstimate returns a rough estimate of tokens used in history.
 func (a *Agent) TokenEstimate() int {
 	total := 0
@@ -305,13 +314,21 @@ func (a *Agent) TokenEstimate() int {
 	return total
 }
 
+// isToolUnsupportedError returns true when a provider rejects the tools parameter.
+func isToolUnsupportedError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "does not support tools") ||
+		(strings.Contains(msg, "tool") && strings.Contains(msg, "400")) ||
+		strings.Contains(msg, "status 400") ||
+		strings.Contains(msg, "tools_not_supported")
+}
 
 var toolBlockRegex = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?\\})\\s*```")
 
 // extractToolCallsFromText looks for JSON blocks in markdown that match a tool call schema.
 // This acts as a fallback for smaller models that fail to use native tool calling.
-func extractToolCallsFromText(content string, registry *tools.Registry) []ollama.ToolCall {
-	var calls []ollama.ToolCall
+func extractToolCallsFromText(content string, registry *tools.Registry) []llm.ToolCall {
+	var calls []llm.ToolCall
 	matches := toolBlockRegex.FindAllStringSubmatch(content, -1)
 	for _, match := range matches {
 		var parsed struct {
@@ -321,8 +338,8 @@ func extractToolCallsFromText(content string, registry *tools.Registry) []ollama
 		if err := json.Unmarshal([]byte(match[1]), &parsed); err == nil {
 			// Only extract if it's a known tool
 			if _, ok := registry.Get(parsed.Name); ok {
-				calls = append(calls, ollama.ToolCall{
-					Function: ollama.ToolFunction{
+				calls = append(calls, llm.ToolCall{
+					Function: llm.ToolFunction{
 						Name:      parsed.Name,
 						Arguments: parsed.Arguments,
 					},

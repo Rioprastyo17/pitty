@@ -6,36 +6,73 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/pitty/pitty/internal/agent"
+	"github.com/pitty/pitty/internal/llm"
+	"github.com/pitty/pitty/internal/llm/anthropic"
+	"github.com/pitty/pitty/internal/llm/gemini"
+	"github.com/pitty/pitty/internal/llm/llamacpp"
+	"github.com/pitty/pitty/internal/llm/openai"
 	"github.com/pitty/pitty/internal/logger"
 	"github.com/pitty/pitty/internal/memory"
-	"github.com/pitty/pitty/internal/ollama"
 	"github.com/pitty/pitty/internal/tools"
 	"github.com/pitty/pitty/internal/ui"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
+
+// ── Provider name constants ───────────────────────────────────────────────────
+
+const (
+	providerLlamaCpp  = "llamacpp"
+	providerOpenAI    = "openai"
+	providerAnthropic = "anthropic"
+	providerGemini    = "gemini"
+	providerGroq      = "groq"
+	providerTogether  = "together"
+	providerMistral   = "mistral"
+	providerDeepSeek  = "deepseek"
+)
 
 func main() {
 	// ── CLI flags ──────────────────────────────────────────────────────────
-	model := flag.String("model", "qwen2.5-coder:1.5b", "Ollama model to use")
-	ollamaURL := flag.String("ollama-url", "http://127.0.0.1:11434", "Ollama API URL")
+	providerFlag := flag.String("provider", providerLlamaCpp,
+		"AI provider: llamacpp | openai | anthropic | gemini | groq | together | mistral | deepseek")
+	model := flag.String("model", "",
+		"Model to use (default depends on provider)")
+	apiURL := flag.String("url", "",
+		"API server URL (auto-detected per provider; override for custom endpoints)")
+	apiKey := flag.String("api-key", "",
+		"API key (falls back to env: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, …)")
 	temp := flag.Float64("temperature", 0.7, "Sampling temperature (0.0–2.0)")
-	maxTokens := flag.Int("max-tokens", 8192, "Max tokens to generate")
+	// Default 2048: aman untuk RAM tersisa ~3GB di i7-4600M CPU-only
+	maxTokens := flag.Int("max-tokens", 2048, "Max tokens to generate (kurangi jika RAM terbatas)")
+	// 4 threads = optimal untuk i7-4600M (2 core / 4 logical thread)
+	threads       := flag.Int("threads", 4, "CPU threads untuk llama.cpp inference (0 = biarkan server menentukan)")
 	sysPromptFile := flag.String("system-prompt", "", "Path to a custom system prompt file")
-	noTools := flag.Bool("no-tools", false, "Disable tool calling (simple chat mode)")
-	importAGY := flag.Bool("import-agy", false, "Import knowledge from Antigravity CLI transcripts and exit")
-	showVersion := flag.Bool("version", false, "Print version and exit")
+	noTools       := flag.Bool("no-tools", false, "Disable tool calling (simple chat mode)")
+	importAGY     := flag.Bool("import-agy", false, "Import knowledge from Antigravity CLI transcripts and exit")
+	showVersion   := flag.Bool("version", false, "Print version and exit")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "pitty v%s — Local AI Coding Assistant\n\n", version)
+		fmt.Fprintf(os.Stderr, "pitty v%s — AI Coding Assistant\n\n", version)
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  pitty [flags]          Start interactive chat\n")
-		fmt.Fprintf(os.Stderr, "  pitty models           List available Ollama models\n")
+		fmt.Fprintf(os.Stderr, "  pitty models           List available models\n")
+		fmt.Fprintf(os.Stderr, "  pitty providers        List supported providers\n")
 		fmt.Fprintf(os.Stderr, "  pitty version          Show version\n\n")
+		fmt.Fprintf(os.Stderr, "Quick start examples:\n")
+		fmt.Fprintf(os.Stderr, "  # Lokal (i7-4600M CPU-only, ~3GB RAM tersisa):\n")
+		fmt.Fprintf(os.Stderr, "  pitty                                           # llamacpp default\n")
+		fmt.Fprintf(os.Stderr, "  pitty -threads 4 -max-tokens 1024              # hemat RAM ekstra\n\n")
+		fmt.Fprintf(os.Stderr, "  # Cloud API (bebas spek laptop):\n")
+		fmt.Fprintf(os.Stderr, "  pitty -provider openai    -model gpt-4o\n")
+		fmt.Fprintf(os.Stderr, "  pitty -provider anthropic -model claude-sonnet-4-5\n")
+		fmt.Fprintf(os.Stderr, "  pitty -provider gemini    -model gemini-2.0-flash\n")
+		fmt.Fprintf(os.Stderr, "  pitty -provider groq      -model llama-3.3-70b-versatile\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
@@ -46,7 +83,6 @@ func main() {
 	// ── Logger ─────────────────────────────────────────────────────────────
 	logPath, logErr := logger.Init(logger.LevelDebug)
 	defer logger.Close()
-	// We'll report logErr after the UI is ready (below).
 	_ = logPath
 	_ = logErr
 
@@ -56,8 +92,13 @@ func main() {
 		return
 	}
 
-	client := ollama.NewClient(*ollamaURL)
 	t := ui.NewTerminalUI()
+
+	// ── Build provider ─────────────────────────────────────────────────────
+	provider, defaultModel := buildProvider(*providerFlag, *apiURL, *apiKey, *threads)
+	if *model == "" {
+		*model = defaultModel
+	}
 
 	// ── Subcommands ────────────────────────────────────────────────────────
 	if len(args) > 0 {
@@ -65,8 +106,11 @@ func main() {
 		case "version":
 			fmt.Printf("pitty v%s\n", version)
 			return
+		case "providers":
+			cmdProviders(t)
+			return
 		case "models":
-			cmdModels(client, t)
+			cmdModels(provider, t, *model)
 			return
 		case "help":
 			flag.Usage()
@@ -85,25 +129,149 @@ func main() {
 	}
 
 	// ── Interactive mode ───────────────────────────────────────────────────
-	runInteractive(client, t, *model, *ollamaURL, *temp, *maxTokens, *sysPromptFile, *noTools)
+	runInteractive(provider, t, *model, *temp, *maxTokens, *sysPromptFile, *noTools, *apiURL, *threads)
 }
 
-// cmdModels lists all models available in Ollama.
-func cmdModels(client *ollama.Client, t *ui.TerminalUI) {
+// ── buildProvider constructs the correct llm.Provider from flags ──────────────
+
+// buildProvider creates a provider and returns (provider, defaultModel).
+func buildProvider(providerName, apiURL, apiKey string, threads int) (llm.Provider, string) {
+	switch strings.ToLower(providerName) {
+	case providerLlamaCpp:
+		url := apiURL
+		if url == "" {
+			url = "http://127.0.0.1:8080"
+		}
+		return llamacpp.New(url, "", threads), "default"
+
+	case providerOpenAI:
+		key := apiKey
+		if key == "" {
+			key = os.Getenv("OPENAI_API_KEY")
+		}
+		cfg := openai.Config{APIKey: key, BaseURL: apiURL}
+		return openai.New(cfg), "gpt-4o"
+
+	case providerAnthropic:
+		key := apiKey
+		if key == "" {
+			key = os.Getenv("ANTHROPIC_API_KEY")
+		}
+		cfg := anthropic.Config{APIKey: key, BaseURL: apiURL}
+		return anthropic.New(cfg), "claude-sonnet-4-5"
+
+	case providerGemini:
+		key := apiKey
+		if key == "" {
+			key = os.Getenv("GEMINI_API_KEY")
+		}
+		cfg := gemini.Config{APIKey: key, BaseURL: apiURL}
+		return gemini.New(cfg), "gemini-2.0-flash"
+
+	case providerGroq:
+		key := apiKey
+		if key == "" {
+			key = os.Getenv("GROQ_API_KEY")
+		}
+		url := apiURL
+		if url == "" {
+			url = "https://api.groq.com/openai/v1"
+		}
+		cfg := openai.Config{APIKey: key, BaseURL: url}
+		return openai.New(cfg), "llama-3.3-70b-versatile"
+
+	case providerTogether:
+		key := apiKey
+		if key == "" {
+			key = os.Getenv("TOGETHER_API_KEY")
+		}
+		url := apiURL
+		if url == "" {
+			url = "https://api.together.xyz/v1"
+		}
+		cfg := openai.Config{APIKey: key, BaseURL: url}
+		return openai.New(cfg), "meta-llama/Llama-3-70b-chat-hf"
+
+	case providerMistral:
+		key := apiKey
+		if key == "" {
+			key = os.Getenv("MISTRAL_API_KEY")
+		}
+		url := apiURL
+		if url == "" {
+			url = "https://api.mistral.ai/v1"
+		}
+		cfg := openai.Config{APIKey: key, BaseURL: url}
+		return openai.New(cfg), "mistral-large-latest"
+
+	case providerDeepSeek:
+		key := apiKey
+		if key == "" {
+			key = os.Getenv("DEEPSEEK_API_KEY")
+		}
+		url := apiURL
+		if url == "" {
+			url = "https://api.deepseek.com/v1"
+		}
+		cfg := openai.Config{APIKey: key, BaseURL: url}
+		return openai.New(cfg), "deepseek-chat"
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown provider: %s\nRun 'pitty providers' to list supported providers.\n", providerName)
+		os.Exit(1)
+		return nil, ""
+	}
+}
+
+// ── Subcommands ───────────────────────────────────────────────────────────────
+
+// cmdProviders lists all supported providers with their environment variables.
+func cmdProviders(t *ui.TerminalUI) {
+	providers := [][3]string{
+		{providerLlamaCpp, "Local llama.cpp server (default)", "—"},
+		{providerOpenAI, "OpenAI (GPT-4o, o1, …)", "OPENAI_API_KEY"},
+		{providerAnthropic, "Anthropic Claude (claude-sonnet-4-5, …)", "ANTHROPIC_API_KEY"},
+		{providerGemini, "Google Gemini (gemini-2.0-flash, …)", "GEMINI_API_KEY"},
+		{providerGroq, "Groq (llama-3.3-70b, …)", "GROQ_API_KEY"},
+		{providerTogether, "Together AI (Llama, Mixtral, …)", "TOGETHER_API_KEY"},
+		{providerMistral, "Mistral AI (mistral-large, …)", "MISTRAL_API_KEY"},
+		{providerDeepSeek, "DeepSeek (deepseek-chat, …)", "DEEPSEEK_API_KEY"},
+	}
+	t.PrintInfo("Supported providers:\n")
+	for _, p := range providers {
+		set := "not set"
+		if p[2] != "—" {
+			if os.Getenv(p[2]) != "" {
+				set = "✓ set"
+			}
+		} else {
+			set = "—"
+		}
+		fmt.Printf("  %-12s  %-40s  %s=%s\n", p[0], p[1], p[2], set)
+	}
+	fmt.Println()
+	t.PrintInfo("Usage: pitty -provider <name> -model <model> [-api-key <key>]")
+}
+
+// cmdModels lists available models for the current provider.
+func cmdModels(provider llm.Provider, t *ui.TerminalUI, currentModel string) {
 	ctx := context.Background()
-	models, err := client.ListModels(ctx)
+	models, err := provider.ListModels(ctx)
 	if err != nil {
 		t.PrintError(fmt.Errorf("failed to list models: %w", err))
 		os.Exit(1)
 	}
-	t.PrintInfo("Available Ollama models:")
-	t.PrintInfo("")
+	if len(models) == 0 {
+		t.PrintInfo("No models returned by provider.")
+		return
+	}
+	t.PrintInfo(fmt.Sprintf("Available models (%s):", provider.Name()))
 	for _, m := range models {
-		size := ""
-		if m.Details.ParameterSize != "" {
-			size = fmt.Sprintf(" (%s, %s)", m.Details.ParameterSize, m.Details.QuantizationLevel)
+		marker := " "
+		if m == currentModel {
+			marker = "●"
 		}
-		fmt.Printf("  • %s%s\n", m.Name, size)
+		fmt.Printf("  %s %s\n", marker, m)
 	}
 }
 
@@ -124,24 +292,46 @@ func cmdImportAGY(t *ui.TerminalUI) {
 	t.PrintInfo(fmt.Sprintf("Total knowledge: %d entries", store.Count()))
 }
 
-// runInteractive is the main REPL loop.
-func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL string, temp float64, maxTokens int, sysPromptFile string, noTools bool) {
+// ── Interactive REPL ──────────────────────────────────────────────────────────
+
+func runInteractive(provider llm.Provider, t *ui.TerminalUI, model string, temp float64, maxTokens int, sysPromptFile string, noTools bool, apiURL string, threads int) {
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Show log file path if logger was initialized
+	// Show log file path
 	if lp := logger.FilePath(); lp != "" {
 		t.PrintInfo(fmt.Sprintf("  📋 Log: %s", lp))
 	}
+	if ep := logger.ErrorFilePath(); ep != "" {
+		absPath, err := filepath.Abs(ep)
+		if err == nil {
+			t.PrintInfo(fmt.Sprintf("  🚨 Error Log: %s", absPath))
+		}
+	}
 
-	// ── Check Ollama connectivity ──────────────────────────────────────────
-	if err := client.Ping(ctx); err != nil {
-		logger.Error("Ollama connectivity check failed: %v", err)
+	url := apiURL
+	if url == "" {
+		url = "http://127.0.0.1:8080"
+	}
+	// ── Check provider connectivity ────────────────────────────────────────
+	if provider.Name() == "llamacpp" {
+		err := llamacpp.AutoStart(ctx, url, threads, func(msg string) {
+			t.PrintInfo("  ⚙️  " + msg)
+		})
+		if err != nil {
+			logger.Error("AutoStart failed: %v", err)
+			t.PrintError(fmt.Errorf("gagal menyiapkan server lokal otomatis: %w", err))
+		}
+	}
+
+	if err := provider.Ping(ctx); err != nil {
+		logger.Error("Provider connectivity check failed: %v", err)
 		t.PrintError(err)
-		t.PrintInfo("Make sure Ollama is running: ollama serve")
+		printProviderHint(provider.Name())
 		os.Exit(1)
 	}
-	logger.Info("Connected to Ollama at %s, model=%s", ollamaURL, model)
+	logger.Info("Connected to provider=%s, model=%s", provider.Name(), model)
 
 	// ── Memory system ──────────────────────────────────────────────────────
 	store, err := memory.NewStore()
@@ -151,7 +341,6 @@ func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL st
 	var learner *memory.Learner
 	if store != nil {
 		learner = memory.NewLearner(store)
-		// Auto-import from Antigravity on first run
 		if store.Count() == 0 {
 			count, _ := memory.ImportFromAntigravity(store)
 			if count > 0 {
@@ -173,7 +362,7 @@ func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL st
 	}
 
 	// ── Agent ──────────────────────────────────────────────────────────────
-	ag := agent.NewAgent(client, registry, model, temp, maxTokens)
+	ag := agent.NewAgent(provider, registry, model, temp, maxTokens)
 	if store != nil && learner != nil {
 		ag.SetMemory(store, learner)
 	}
@@ -203,7 +392,7 @@ func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL st
 	if store != nil {
 		memCount = store.Count()
 	}
-	t.PrintWelcome(model, ollamaURL, memCount)
+	t.PrintWelcome(model, provider.Name(), memCount)
 
 	// ── Signal handling ────────────────────────────────────────────────────
 	sigCh := make(chan os.Signal, 1)
@@ -233,11 +422,11 @@ func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL st
 
 		// Handle slash commands
 		if strings.HasPrefix(input, "/") {
-			handleCommand(ctx, input, ag, t, &model, client, store, learner, noTools)
+			handleCommand(ctx, input, ag, t, &model, provider, store, learner, noTools)
 			continue
 		}
 
-		// ── Chat ───────────────────────────────────────────────────────────
+		// ── Chat ────────────────────────────────────────────────────────────
 		t.StartThinking()
 		firstChunk := true
 
@@ -267,8 +456,31 @@ func runInteractive(client *ollama.Client, t *ui.TerminalUI, model, ollamaURL st
 	}
 }
 
-// handleCommand processes a slash command entered by the user.
-func handleCommand(ctx context.Context, input string, ag *agent.Agent, t *ui.TerminalUI, model *string, client *ollama.Client, store *memory.Store, learner *memory.Learner, noTools bool) {
+// printProviderHint prints a helpful hint for the given provider when connection fails.
+func printProviderHint(providerName string) {
+	switch providerName {
+	case providerLlamaCpp:
+		fmt.Fprintln(os.Stderr, "Hint: Start llama.cpp server with: ./llama-server -m model.gguf --port 8080")
+	case providerOpenAI:
+		fmt.Fprintln(os.Stderr, "Hint: Set OPENAI_API_KEY or pass -api-key <key>")
+	case providerAnthropic:
+		fmt.Fprintln(os.Stderr, "Hint: Set ANTHROPIC_API_KEY or pass -api-key <key>")
+	case providerGemini:
+		fmt.Fprintln(os.Stderr, "Hint: Set GEMINI_API_KEY or pass -api-key <key>")
+	case providerGroq:
+		fmt.Fprintln(os.Stderr, "Hint: Set GROQ_API_KEY or pass -api-key <key>")
+	case providerTogether:
+		fmt.Fprintln(os.Stderr, "Hint: Set TOGETHER_API_KEY or pass -api-key <key>")
+	case providerMistral:
+		fmt.Fprintln(os.Stderr, "Hint: Set MISTRAL_API_KEY or pass -api-key <key>")
+	case providerDeepSeek:
+		fmt.Fprintln(os.Stderr, "Hint: Set DEEPSEEK_API_KEY or pass -api-key <key>")
+	}
+}
+
+// ── Command handler ───────────────────────────────────────────────────────────
+
+func handleCommand(ctx context.Context, input string, ag *agent.Agent, t *ui.TerminalUI, model *string, provider llm.Provider, store *memory.Store, learner *memory.Learner, noTools bool) {
 	parts := strings.Fields(input)
 	if len(parts) == 0 {
 		return
@@ -293,6 +505,7 @@ func handleCommand(ctx context.Context, input string, ag *agent.Agent, t *ui.Ter
 	case "/model":
 		if len(parts) < 2 {
 			t.PrintInfo("Current model: " + *model)
+			t.PrintInfo(fmt.Sprintf("Provider: %s", ag.Provider()))
 			t.PrintInfo("Usage: /model <name>")
 			return
 		}
@@ -302,19 +515,39 @@ func handleCommand(ctx context.Context, input string, ag *agent.Agent, t *ui.Ter
 
 	// ── List models ─────────────────────────────────────────────────────────
 	case "/models":
-		models, err := client.ListModels(ctx)
-		if err != nil {
-			t.PrintError(err)
+		cmdModels(provider, t, *model)
+
+	// ── Switch provider ──────────────────────────────────────────────────────
+	case "/provider":
+		if len(parts) < 2 {
+			t.PrintInfo(fmt.Sprintf("Current provider: %s", ag.Provider()))
+			t.PrintInfo("Usage: /provider <name> [model]")
+			t.PrintInfo("Run 'pitty providers' to list all supported providers.")
 			return
 		}
-		t.PrintInfo("Available models:")
-		for _, m := range models {
-			marker := " "
-			if m.Name == *model {
-				marker = "●"
-			}
-			fmt.Printf("  %s %s\n", marker, m.Name)
+		newProviderName := parts[1]
+		newModel := ""
+		if len(parts) >= 3 {
+			newModel = parts[2]
 		}
+		newProvider, defaultModel := buildProvider(newProviderName, "", "", 0)
+		if newModel == "" {
+			newModel = defaultModel
+		}
+
+		// Ping before switching
+		pingCtx, pingCancel := context.WithCancel(ctx)
+		defer pingCancel()
+		if err := newProvider.Ping(pingCtx); err != nil {
+			t.PrintError(fmt.Errorf("cannot connect to %s: %w", newProviderName, err))
+			printProviderHint(newProviderName)
+			return
+		}
+		ag.SetProvider(newProvider)
+		ag.SetModel(newModel)
+		*model = newModel
+		// Update the outer provider variable (passed by value, so note it's not updated in parent)
+		t.PrintSuccess(fmt.Sprintf("Switched to provider=%s model=%s", newProviderName, newModel))
 
 	// ── Learn a fact ────────────────────────────────────────────────────────
 	case "/learn":
@@ -395,7 +628,6 @@ func handleCommand(ctx context.Context, input string, ag *agent.Agent, t *ui.Ter
 			t.PrintInfo("No conversation to compact.")
 			return
 		}
-		// Build a summary prompt
 		var sb strings.Builder
 		sb.WriteString("Summarize the following conversation into a concise bullet-point list of key decisions, code changes, and facts. Be brief:\n\n")
 		for _, msg := range history {
@@ -434,7 +666,6 @@ func handleCommand(ctx context.Context, input string, ag *agent.Agent, t *ui.Ter
 			t.PrintError(chatErr)
 			return
 		}
-		// Reset and inject compact summary as initial context
 		ag.Reset()
 		if learner != nil && summary.Len() > 0 {
 			learner.LearnFact("Conversation summary: "+summary.String(), "compact command", []string{"summary", "compact"})
